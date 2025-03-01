@@ -431,7 +431,7 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=20.0, 
                         help="Time to wait for website to load.")
     # Collection server URL argument with a default value
-    parser.add_argument("--server", default="http://localhost:5000",
+    parser.add_argument("--server", default="http://192.168.100.1:5000",
                         help="URL of the collection server.")
     parser.add_argument("--restart-tunnel-threshold", type=int, default=5,
                         help="Restart tunnel threshold.")
