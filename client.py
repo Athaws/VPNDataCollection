@@ -41,8 +41,7 @@ def start_pcap_capture(windows_interface="Ethernet0"):
     except Exception as e:
         pass
 
-    # using tshark to capture network traffic, only UDP packets and only the
-    # first 64 bytes of each packet
+    # using tshark to capture network traffic, only UDP packets and only the first 64 bytes of each packet
     if platform.system() == "Windows":
         cmd = ["tshark", "-i", windows_interface, "-f" ,"port 51820" ,"-s", "64", "-w", tmp_pcap_file]
     else: # Linux and potentially macOS
@@ -74,10 +73,9 @@ def start_browser(custom_path):
     try:
         options = Options()
         options.binary_location = custom_path
+        options.add_argument("--headless")
         firefox_service = Service(executable_path="/usr/local/bin/geckodriver",)
         driver = webdriver.Firefox(options=options, service=firefox_service)
-        # we try default from exp1
-        # driver.set_window_size(2560, 1440) # 1440p
         return driver
     except Exception as error:
         print("exception on start_browser:", error)
@@ -130,7 +128,7 @@ def close_executable(executable_name):
 
 def is_mullvadvpn_service_running():
     try:
-        result = subprocess.run(["sudo", "systemctl", "is-active", "mullvad-daemon"],
+        result = subprocess.run(["systemctl", "is-active", "mullvad-daemon"],
             capture_output=True, text=True, check=True)
         return "active" in result.stdout
     except Exception as e:
