@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import random
+from typing import Any
 from selenium import webdriver
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.remote.webdriver import WebDriver
 import time
 import subprocess
 import platform
@@ -26,11 +28,13 @@ DEVICE_CONFIG_FILE = r"/etc/mullvad-vpn/device.json"
 capture_process = None
 tmp_pcap_file = os.path.join(tempfile.gettempdir(), "temp_capture.pcap")
 whoami = None
+last_server = None
+daita_on = False
 
 # global session for all requests through a proxy
 session = requests.Session()
 
-def start_pcap_capture(windows_interface="Ethernet0"):
+def start_pcap_capture(windows_interface="Ethernet0") -> None:
     global capture_process, tmp_pcap_file
     cmd = []
 
@@ -41,14 +45,15 @@ def start_pcap_capture(windows_interface="Ethernet0"):
     except Exception as e:
         pass
 
-    # using tshark to capture network traffic, only UDP packets and only the first 64 bytes of each packet
+    # using tshark to capture network traffic, only UDP packets and only the
+    # first 64 bytes of each packet
     if platform.system() == "Windows":
         cmd = ["tshark", "-i", windows_interface, "-f" ,"port 51820" ,"-s", "64", "-w", tmp_pcap_file]
     else: # Linux and potentially macOS
         cmd = ["sudo", "tshark", "-i", "any", "-f" ,"port 51820" ,"-s", "64", "-w", tmp_pcap_file]
     capture_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-def end_pcap_capture():
+def end_pcap_capture() -> bytes:
     global capture_process, tmp_pcap_file
     capture_process.terminate()
     
@@ -62,18 +67,16 @@ def end_pcap_capture():
     subprocess.run(cmd)
     return pcap_data
 
-def wait_for_page_load(driver, timeout, extra_sleep=2):
+def wait_for_page_load(driver, timeout, extra_sleep=2) -> None:
     WebDriverWait(driver, timeout).until(
         lambda d: d.execute_script('return document.readyState') == 'complete'
     )
-
     time.sleep(extra_sleep)
 
-def start_browser(custom_path):
+def start_browser(custom_path) -> WebDriver | None:
     try:
         options = Options()
         options.binary_location = custom_path
-        options.add_argument("--headless")
         firefox_service = Service(executable_path="/usr/local/bin/geckodriver",)
         driver = webdriver.Firefox(options=options, service=firefox_service)
         return driver
@@ -81,7 +84,7 @@ def start_browser(custom_path):
         print("exception on start_browser:", error)
         return None
 
-def visit_site(driver, url, timeout):
+def visit_site(driver, url, timeout) -> (bytes | Any | None):
     screenshot_as_binary = None
     try:
         driver.command_executor.set_timeout(timeout)
@@ -115,7 +118,7 @@ def visit_site(driver, url, timeout):
 
     return screenshot_as_binary
 
-def close_executable(executable_name):
+def close_executable(executable_name) -> bool:
     try:
         subprocess.run(
             ["sudo", "pkill", "-f", executable_name],
@@ -123,19 +126,20 @@ def close_executable(executable_name):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        return True
     except:
-        pass
+        return False
 
-def is_mullvadvpn_service_running():
+def is_mullvadvpn_service_running() -> bool:
     try:
-        result = subprocess.run(["systemctl", "is-active", "mullvad-daemon"],
+        result = subprocess.run(["sudo", "systemctl", "is-active", "mullvad-daemon"],
             capture_output=True, text=True, check=True)
         return "active" in result.stdout
     except Exception as e:
         print("is_mullvadvpn_service_running error", e)
         return False
 
-def toggle_mullvadvpn_service(action):
+def toggle_mullvadvpn_service(action) -> bool:
     try:
         print("Toggling mullvadvpn service:", action)
         if action == "on":
@@ -145,10 +149,12 @@ def toggle_mullvadvpn_service(action):
         subprocess.run(["sudo", "systemctl", action, "mullvad-daemon"], check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
+        return True
     except Exception as e:
         print("toggle_mullvadvpn_service error", e)
+        return False
 
-def toggle_mullvadvpn_tunnel(action):
+def toggle_mullvadvpn_tunnel(action) -> bool:
     try:
         print("Toggling mullvadvpn tunnel:", action)
         if action == "on":
@@ -158,11 +164,12 @@ def toggle_mullvadvpn_tunnel(action):
 
         subprocess.run(["mullvad", action], capture_output=True, text=True, check=True)
         time.sleep(2)
+        return True
     except Exception as e:
         print("toggle_mullvadvpn_tunnel error", e)
         return False
 
-def is_mullvadvpn_tunnel_running():
+def is_mullvadvpn_tunnel_running() -> bool:
     try:
         result = subprocess.run(["mullvad", "status"], capture_output=True, text=True, check=True)
         return "Connected" in result.stdout
@@ -170,25 +177,48 @@ def is_mullvadvpn_tunnel_running():
         print("is_mullvadvpn_tunnel_running error", e)
         return False
 
-def configure_mullvad(account):#, settings):
+def configure_mullvad() -> bool:
     try:
         # enable LAN access
         command = ["mullvad", "lan", "set", "allow"]
-        subprocess.run(command, capture_output=True, text=True, check=True)
-
-        # enable DAITA
-        command = ["mullvad", "tunnel", "set", "wireguard", "--daita", "on"]
         subprocess.run(command, capture_output=True, text=True, check=True)
 
         # use default mullvad port 51820
         command = ["mullvad", "relay", "set", "tunnel", "wireguard", "-p", "51820"]
         subprocess.run(command, capture_output=True, text=True, check=True)
 
+        # default start with daita off
+        command = ["mullvad", "tunnel", "set", "wireguard", "--daita", "off"]
+        subprocess.run(command, capture_output=True, text=True, check=True)
+
+        return True
     except Exception as e:
         print("configure_mullvad error", e)
         return False
+    
+def configure_mullvad_for_visit(server, daita) -> bool:
+    global last_server, daita_on
+    try:
+        if last_server != server:
+            # use the specific VPN server we were given by the server
+            command = ["mullvad", "relay", "set", "location", server]
+            subprocess.run(command, capture_output=True, text=True, check=True)
+            time.sleep(2)
 
-def get_device_json(account):
+        if daita_on and daita == 'off':
+            # daita currently enabled but should be disabled for this visit
+            command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
+            subprocess.run(command, capture_output=True, text=True, check=True)
+        elif not daita_on and daita == 'on':
+            # daita currently disabled but should be enabled for this visit
+            command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
+            subprocess.run(command, capture_output=True, text=True, check=True)
+        return True
+    except Exception as e:
+        print("configure_mullvad_for_visit error", e)
+        return False
+
+def get_device_json(account) -> dict[str, dict[str, Any]]:
     # we set the timestamp 1 year in the future, this is to prevent the client
     # from refreshing our keys, the refresh doesn't work very well when we set
     # a custom relay
@@ -215,7 +245,7 @@ def get_device_json(account):
         }
     }
 
-def setup_vpn(server):
+def setup_vpn(server) -> bool:
     global session
     try:
         response = session.get(urljoin(server, "setup"), params={'id': whoami})
@@ -254,7 +284,7 @@ def setup_vpn(server):
         toggle_mullvadvpn_service("on")
 
         # make some configuration
-        configure_mullvad(account)
+        configure_mullvad()
 
         # and finally, enable the tunnel
         toggle_mullvadvpn_tunnel("on")
@@ -267,21 +297,23 @@ def setup_vpn(server):
         print("setup failed, error", e)
         return False
 
-def get_work(server):
+def get_work(server) -> dict | None:
     global session
     try:
         work_url = urljoin(server, "work")
         response = session.get(work_url, params={'id': whoami})
         response.raise_for_status()
-        return response.text
+        return response.json()
     except requests.RequestException:
-        return ""
+        return None
 
-def post_work_to_server(server, url, png_data, pcap_data):
+def post_work_to_server(server, url, vpn, daita, png_data, pcap_data) -> bool:
     global session
     payload = {
         'id': whoami,
         'url': url,
+        'vpn': vpn,
+        'daita': daita,
         'png_data': png_data.hex(),
         'pcap_data': pcap_data.hex(),
     }
@@ -290,17 +322,14 @@ def post_work_to_server(server, url, png_data, pcap_data):
     except requests.RequestException:
         return False
 
-def is_admin():
-    return os.geteuid() == 0
-
-def successful_tunnel_restart():
+def successful_tunnel_restart() -> bool:
     toggle_mullvadvpn_tunnel("off")
     toggle_mullvadvpn_service("off")
     toggle_mullvadvpn_service("on")
     toggle_mullvadvpn_tunnel("on")
     return is_mullvadvpn_tunnel_running()
 
-def generate_identifier():
+def generate_identifier() -> str:
     ip_addresses = []
 
     # Get info about all network interfaces
@@ -325,15 +354,9 @@ def generate_identifier():
     # Return the first 16 characters of the hash
     return hex_dig[:16]
 
-def main(args):
+def main(args) -> None:
     global whoami
     global session
-    print("requires Python 3.6+")
-    print("requires GeckoDriver to be installed and in PATH, see https://github.com/mozilla/geckodriver/releases/latest")
-    print("requires tshark to be installed and in PATH, see https://www.wireshark.org/download.html")
-    print("requires executing user to have sudoer rights: ALL=(ALL) NOPASSWD: ALL")
-    print("requires Firefox (or Mullvad Browser) to be installed")
-    print("requires `pip install selenium requests Pillow psutil`")
 
     # deterministic identifier of 16 characters, derived from the IP addresses
     # of the machine
@@ -368,8 +391,10 @@ def main(args):
 
                 work_attempts += 1
                 if work_attempts > 10:
-                    print("Failed to get work from server 10 times in a row, stopping client")
-                    break
+                    print("Failed to get work from server 10 times in a row, resetting and asking for new setup in 60 seconds")
+                    time.sleep(60)
+                    setup_vpn(server)
+                    continue
 
                 r = random.randint(10, 20)
                 print(f"No work available, sleeping for {r} seconds")
@@ -380,7 +405,7 @@ def main(args):
                 if not is_mullvadvpn_service_running():
                     toggle_mullvadvpn_service("on")
                     toggle_mullvadvpn_tunnel("on")
-
+                configure_mullvad_for_visit(work['vpn'], work['daita'])
                 print(f"{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} Got work: {work}")
                 driver = start_browser(args.firefox)
                 if driver is None:
@@ -393,7 +418,7 @@ def main(args):
                 # reliable enough to use.
                 time.sleep(5)
                 start_pcap_capture()
-                png = visit_site(driver, work, args.timeout)
+                png = visit_site(driver, work['url'], args.timeout)
                 if png is None:
                     print("Failed to visit site, skipping work")
                     end_pcap_capture()
@@ -401,7 +426,7 @@ def main(args):
                 print(f"Captured {len(png)/1024:.1f} KiB of png data.")
                 pcap_bytes = end_pcap_capture()
                 print(f"Captured {len(pcap_bytes)/1024:.1f} KiB of pcap data.")
-                while not post_work_to_server(server, work, png, pcap_bytes):
+                while not post_work_to_server(server, work["url"], work["vpn"], work["daita"], png, pcap_bytes):
                     r = random.randint(10, 20)
                     print(f"Failed to post work to server, retrying in {r} seconds")
                     time.sleep(r)
