@@ -203,16 +203,19 @@ def configure_mullvad_for_visit(server, daita) -> bool:
             # use the specific VPN server we were given by the server
             command = ["mullvad", "relay", "set", "location", server]
             subprocess.run(command, capture_output=True, text=True, check=True)
+            last_server = server
             time.sleep(2)
 
         if daita_on and daita == 'off':
             # daita currently enabled but should be disabled for this visit
             command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
             subprocess.run(command, capture_output=True, text=True, check=True)
+            daita_on = False
         elif not daita_on and daita == 'on':
             # daita currently disabled but should be enabled for this visit
             command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
             subprocess.run(command, capture_output=True, text=True, check=True)
+            daita_on = True
         return True
     except Exception as e:
         print("configure_mullvad_for_visit error", e)
