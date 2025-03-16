@@ -42,7 +42,7 @@ def start_pcap_capture(windows_interface="Ethernet0") -> None:
     try:
         capture_process.terminate()
         os.remove(tmp_pcap_file)
-    except Exception as e:
+    except:
         pass
 
     # using tshark to capture network traffic, only UDP packets and only the
@@ -56,13 +56,12 @@ def start_pcap_capture(windows_interface="Ethernet0") -> None:
 def end_pcap_capture() -> bytes:
     global capture_process, tmp_pcap_file
     capture_process.terminate()
-    
+    capture_process.wait() 
+
     cmd = ["sudo", "cat", tmp_pcap_file]
-    pcap_data = subprocess.run(cmd, 
-                               stdout=subprocess.PIPE, 
-                               stderr=subprocess.PIPE,
-                               ).stdout
-    
+    cat_pcap = subprocess.run(cmd, capture_output=True)
+    pcap_data = cat_pcap.stdout
+
     cmd = ["sudo", "rm", tmp_pcap_file]
     subprocess.run(cmd)
     return pcap_data
@@ -134,7 +133,7 @@ def is_mullvadvpn_service_running() -> bool:
     try:
         result = subprocess.run(["sudo", "systemctl", "is-active", "mullvad-daemon"],
             capture_output=True, text=True, check=True)
-        return "active" in result.stdout
+        return result.returncode == 0
     except Exception as e:
         print("is_mullvadvpn_service_running error", e)
         return False
@@ -200,7 +199,7 @@ def configure_mullvad_for_visit(server, daita) -> bool:
     global last_server, daita_on
     try:
         if last_server != server:
-            # use the specific VPN server we were given by the server
+            # change to the specific VPN server we were given by the server
             command = ["mullvad", "relay", "set", "location", server]
             subprocess.run(command, capture_output=True, text=True, check=True)
             last_server = server
@@ -281,7 +280,7 @@ def setup_vpn(server) -> bool:
             json.dump(get_device_json(account), tmp_f, indent=4)
             tmp_path = tmp_f.name
         subprocess.run(["sudo", "mv", tmp_path, DEVICE_CONFIG_FILE], check=True)
-        
+
         # enable the mullvadvpn daemon again, this has to be done prior to the
         # configuration of the mullvad daemon
         toggle_mullvadvpn_service("on")
@@ -374,10 +373,6 @@ def main(args) -> None:
             print(f"VPN is not setup, sleeping for {r} seconds")
             time.sleep(r)
 
-        # Keep track of how many iterations of work have been completed. When
-        # args.restart_tunnel_threshold is reached, we'll restart the tunnel.
-        work_count = 0
-
         # Keep track of the number of attempts to get work from the server. If
         # we fail to get work from the server 10 times in a row, we'll restart
         # the tunnel.
@@ -391,13 +386,11 @@ def main(args) -> None:
                 if is_mullvadvpn_service_running():
                     toggle_mullvadvpn_tunnel("off")
                     toggle_mullvadvpn_service("off")
-
                 work_attempts += 1
                 if work_attempts > 10:
                     print("Failed to get work from server 10 times in a row, resetting and asking for new setup in 60 seconds")
                     time.sleep(60)
-                    setup_vpn(server)
-                    continue
+                    break
 
                 r = random.randint(10, 20)
                 print(f"No work available, sleeping for {r} seconds")
@@ -408,17 +401,19 @@ def main(args) -> None:
                 if not is_mullvadvpn_service_running():
                     toggle_mullvadvpn_service("on")
                     toggle_mullvadvpn_tunnel("on")
-                configure_mullvad_for_visit(work['vpn'], work['daita'])
                 print(f"{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} Got work: {work}")
                 driver = start_browser(args.firefox)
                 if driver is None:
                     print("Failed to start browser, skipping work")
                     continue
+                configure_mullvad_for_visit(work['vpn'], work['daita'])
                 # Sleep for 5 seconds to let the browser start up. Every visit has a
                 # fresh browser and profile thanks to Selenium. This is a little bit
                 # of being a bad citizen, but hopefully it's not too bad.
                 # Unfortunately the options to cache reset within Firefox aren't
                 # reliable enough to use.
+                # Also helps to le the current Mullvad connection get settled,
+                # if we swapped to a different server, daita on/off, etc.
                 time.sleep(5)
                 start_pcap_capture()
                 png = visit_site(driver, work['url'], args.timeout)
@@ -426,27 +421,13 @@ def main(args) -> None:
                     print("Failed to visit site, skipping work")
                     end_pcap_capture()
                     continue
-                print(f"Captured {len(png)/1024:.1f} KiB of png data.")
                 pcap_bytes = end_pcap_capture()
+                print(f"Captured {len(png)/1024:.1f} KiB of png data.")
                 print(f"Captured {len(pcap_bytes)/1024:.1f} KiB of pcap data.")
                 while not post_work_to_server(server, work["url"], work["vpn"], work["daita"], png, pcap_bytes):
                     r = random.randint(10, 20)
                     print(f"Failed to post work to server, retrying in {r} seconds")
                     time.sleep(r)
-
-                # Increment the counter and check whether or not the threshold has
-                # been reached, when it's reached we'll restart the tunnel.
-                work_count += 1
-                if work_count > args.restart_tunnel_threshold:
-                    print("Restart tunnel threshold reached, restarting tunnel")
-
-                    while not successful_tunnel_restart():
-                        r = random.randint(10, 20)
-                        print(f"Tunnel restart failed, sleeping for {r} seconds")
-                        time.sleep(r)
-
-                    work_count = 0
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Capture a screenshot with Selenium and send to a server.")
