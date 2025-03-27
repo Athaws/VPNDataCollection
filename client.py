@@ -2,11 +2,11 @@
 import argparse
 import random
 from typing import Any
-from selenium import webdriver
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver import Firefox
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
-from selenium.webdriver.remote.webdriver import WebDriver
 import time
 import subprocess
 import platform
@@ -24,9 +24,11 @@ import hashlib
 
 DEVICE_CONFIG_FILE = r"/etc/mullvad-vpn/device.json"
 
-# global variable to store the process object of the capture
+# global variables to store the process object of the capture
 capture_process = None
-tmp_pcap_file = os.path.join(tempfile.gettempdir(), "temp_capture.pcap")
+tmp_pcap_file = os.path.join(tempfile.gettempdir(), f"{os.urandom(4).hex()}.pcap")
+
+# global variables to store identity and states
 whoami = None
 last_server = None
 daita_on = False
@@ -36,15 +38,8 @@ session = requests.Session()
 
 def start_pcap_capture(windows_interface="Ethernet0") -> None:
     global capture_process, tmp_pcap_file
+    tmp_pcap_file = os.path.join(tempfile.gettempdir(), f"{os.urandom(4).hex()}.pcap")
     cmd = []
-
-    # cleanup any previous pcap
-    try:
-        capture_process.terminate()
-        os.remove(tmp_pcap_file)
-    except:
-        pass
-
     # using tshark to capture network traffic, only UDP packets and only the
     # first 64 bytes of each packet
     if platform.system() == "Windows":
@@ -52,12 +47,13 @@ def start_pcap_capture(windows_interface="Ethernet0") -> None:
     else: # Linux and potentially macOS
         cmd = ["sudo", "tshark", "-i", "any", "-f" ,"port 51820" ,"-s", "64", "-w", tmp_pcap_file]
     capture_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return
 
 def end_pcap_capture() -> bytes:
     global capture_process, tmp_pcap_file
     capture_process.terminate()
-    capture_process.wait() 
-
+    capture_process.wait()
+    
     cmd = ["sudo", "cat", tmp_pcap_file]
     cat_pcap = subprocess.run(cmd, capture_output=True)
     pcap_data = cat_pcap.stdout
@@ -77,7 +73,7 @@ def start_browser(custom_path) -> WebDriver | None:
         options = Options()
         options.binary_location = custom_path
         firefox_service = Service(executable_path="/usr/local/bin/geckodriver",)
-        driver = webdriver.Firefox(options=options, service=firefox_service)
+        driver = Firefox(options=options, service=firefox_service)
         return driver
     except Exception as error:
         print("exception on start_browser:", error)
@@ -97,7 +93,6 @@ def visit_site(driver, url, timeout) -> (bytes | Any | None):
 
     try:
         screenshot_as_binary = driver.get_screenshot_as_png()
-        # resize screenshot
         # Load the screenshot into Pillow Image
         image = Image.open(io.BytesIO(screenshot_as_binary))
 
@@ -198,13 +193,6 @@ def configure_mullvad() -> bool:
 def configure_mullvad_for_visit(server, daita) -> bool:
     global last_server, daita_on
     try:
-        if last_server != server:
-            # change to the specific VPN server we were given by the server
-            command = ["mullvad", "relay", "set", "location", server]
-            subprocess.run(command, capture_output=True, text=True, check=True)
-            last_server = server
-            time.sleep(2)
-
         if daita_on and daita == 'off':
             # daita currently enabled but should be disabled for this visit
             command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
@@ -215,7 +203,16 @@ def configure_mullvad_for_visit(server, daita) -> bool:
             command = ["mullvad", "tunnel", "set", "wireguard", "--daita", daita]
             subprocess.run(command, capture_output=True, text=True, check=True)
             daita_on = True
-        return True
+        
+        if last_server != server:
+            # change to the specific VPN server we were given by the server
+            toggle_mullvadvpn_tunnel("off")
+            command = ["mullvad", "relay", "set", "location", server]
+            subprocess.run(command, capture_output=True, text=True, check=True)
+            last_server = server
+            toggle_mullvadvpn_tunnel("on")
+        
+        return is_mullvadvpn_tunnel_running()
     except Exception as e:
         print("configure_mullvad_for_visit error", e)
         return False
@@ -280,6 +277,11 @@ def setup_vpn(server) -> bool:
             json.dump(get_device_json(account), tmp_f, indent=4)
             tmp_path = tmp_f.name
         subprocess.run(["sudo", "mv", tmp_path, DEVICE_CONFIG_FILE], check=True)
+        
+        # reload systemctl since we changed files service files
+        # and give it a second to successfully reload
+        subprocess.run(["sudo", "systemctl", "daemon-reload"])
+        time.sleep(1)
 
         # enable the mullvadvpn daemon again, this has to be done prior to the
         # configuration of the mullvad daemon
