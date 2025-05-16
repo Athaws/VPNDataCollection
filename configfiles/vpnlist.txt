@@ -1,0 +1,6 @@
+se-got-wg-001
+nl-ams-wg-002
+ch-zrh-wg-005
+de-fra-wg-101
+gb-lon-wg-008
+us-nyc-wg-601

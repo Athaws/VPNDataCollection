@@ -1,0 +1,8 @@
+# Wouldn't want to leak the file with the accounts, right?
+configfiles/*.json
+
+# No logfiles need to be leaked either, I'd reckon.
+*.log
+
+# The scripts here will be made available sometime in the future.
+dataprocessing/*
